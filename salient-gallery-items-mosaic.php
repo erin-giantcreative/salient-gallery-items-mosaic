@@ -27,6 +27,9 @@ add_action('init', function () {
   delete_transient('sgim_terms_market_gallery_items');
   delete_transient('sgim_terms_product_gallery_items');
   delete_transient('sgim_terms_project_gallery_items');
+  delete_transient('sgim_terms_orderBy_gallery_items');
+  delete_transient('sgim_terms_per_page_gallery_items');
+  delete_transient('sgim_terms_page_gallery_items');
 });
 
 final class Salient_Gallery_Items_Mosaic {
