@@ -1,51 +1,46 @@
 <?php
 /**
  * Plugin Name: Salient - Gallery Items Mosaic (WPBakery Element)
- * Description: WPBakery element for Salient: filterable mosaic gallery for "gallery-items" CPT with ACF + taxonomies + accessible lightbox + cached AJAX.
- * Version: 1.1.1
+ * Description: WPBakery element for Salient: filterable mosaic gallery for "gallery-items" CPT with ACF + taxonomies + accessible lightbox + cached AJAX + infinite scroll.
+ * Version: 1.2.0
  * Author: Giant Creative Inc
  *
- * SEO / Performance improvements included:
- * 1) ItemList schema (JSON-LD) for the visible items.
- * 2) ImageObject schema for each visible item (embedded in ItemList).
- * 3) Tiles are real links to the single post (crawlable + can open in new tab).
- * 4) Strong alt fallback + screen-reader-only caption per tile.
- * 5) "Browse" section with real term links for market/product/project (internal linking).
- * 6) Optional noindex for gallery-items single posts (toggle via shortcode param).
- * 7) LCP tuning: first N images load eager + fetchpriority high.
- *
- * Requirements:
- * - WPBakery Page Builder (element UI)
- * - ACF (image + mosaic_size + description fields)
+ * Includes:
+ * - Cached queries (transients) for terms + filtered results
+ * - Accessible lightbox (keyboard + focus trap)
+ * - Tiles are real links to single posts
+ * - ItemList/ImageObject schema on initial load
+ * - Infinite scroll pagination (append pages on scroll)
  *
  * Data Model:
  * - CPT: gallery-items
- * - ACF fields:
- *   - image (image field) -> attachment ID
+ * - ACF/meta fields:
+ *   - image (image field) -> attachment ID (ACF stores ID in meta; we also support URL/array just in case)
  *   - mosaic_size (select) values: Regular, Tall, WideTall, Wide
  *   - description (textarea)
- * - Taxonomies:
- *   - market
- *   - product
- *   - project
+ * - Taxonomies: market, product, project
  */
 
 defined('ABSPATH') || exit;
+
+add_action('init', function () {
+  delete_transient('sgim_terms_market_gallery_items');
+  delete_transient('sgim_terms_product_gallery_items');
+  delete_transient('sgim_terms_project_gallery_items');
+});
 
 final class Salient_Gallery_Items_Mosaic {
 
 	const SHORTCODE      = 'sgim_gallery_mosaic';
 	const CACHE_PREFIX   = 'sgim_';
 
-	const CACHE_TTL_QUERY = 10 * MINUTE_IN_SECONDS;
-	const CACHE_TTL_TERMS = 60 * MINUTE_IN_SECONDS;
+	// Increase if your gallery doesn't change often.
+	const CACHE_TTL_QUERY = 6 * HOUR_IN_SECONDS;
+	const CACHE_TTL_TERMS = 12 * HOUR_IN_SECONDS;
 
 	const STYLE_HANDLE  = 'sgim-gallery-mosaic';
 	const SCRIPT_HANDLE = 'sgim-gallery-mosaic';
 
-	/**
-	 * Boot hooks.
-	 */
 	public static function init() {
 		add_action('init', [__CLASS__, 'register_shortcode']);
 		add_action('wp_enqueue_scripts', [__CLASS__, 'register_assets']);
@@ -70,14 +65,14 @@ final class Salient_Gallery_Items_Mosaic {
 			self::STYLE_HANDLE,
 			$plugin_url . 'assets/gallery-mosaic.css',
 			[],
-			'1.1.1'
+			'1.2.0'
 		);
 
 		wp_register_script(
 			self::SCRIPT_HANDLE,
 			$plugin_url . 'assets/gallery-mosaic.js',
 			['jquery'],
-			'1.1.1',
+			'1.2.0',
 			true
 		);
 	}
@@ -89,13 +84,23 @@ final class Salient_Gallery_Items_Mosaic {
 			'name'        => 'Gallery Items Mosaic',
 			'base'        => self::SHORTCODE,
 			'category'    => 'Content',
-			'description' => 'Filterable mosaic gallery from gallery-items CPT (ACF + taxonomies).',
+			'description' => 'Filterable mosaic gallery from gallery-items CPT (ACF/meta + taxonomies).',
 			'params'      => [
 				[
 					'type'        => 'textfield',
-					'heading'     => 'Max items (optional)',
-					'param_name'  => 'max_items',
-					'description' => 'Leave blank for all items. Use a number for a cap.',
+					'heading'     => 'Items per page',
+					'param_name'  => 'per_page',
+					'description' => 'Default 24. Used for infinite scroll.',
+				],
+				[
+					'type'        => 'dropdown',
+					'heading'     => 'Infinite scroll?',
+					'param_name'  => 'infinite',
+					'value'       => [
+						'Yes' => '1',
+						'No'  => '0',
+					],
+					'std' => '1',
 				],
 				[
 					'type'        => 'dropdown',
@@ -126,23 +131,10 @@ final class Salient_Gallery_Items_Mosaic {
 					'param_name'  => 'eager_first',
 					'description' => 'Default 2. Helps LCP.',
 				],
-				[
-					'type'        => 'textfield',
-					'heading'     => 'Browse links per taxonomy',
-					'param_name'  => 'browse_limit',
-					'description' => 'Default 10. Shows term links under the gallery.',
-				],
 			],
 		]);
 	}
 
-	/**
-	 * Output <meta name="robots" content="noindex,follow"> on single gallery-items
-	 * if at least one instance of the shortcode on the site set noindex_singles=1.
-	 *
-	 * We store the setting in an option during shortcode render, so it works site-wide.
-	 * This avoids needing a separate admin settings screen.
-	 */
 	public static function maybe_output_noindex_meta() {
 		if (!is_singular('gallery-items')) return;
 
@@ -152,41 +144,37 @@ final class Salient_Gallery_Items_Mosaic {
 		echo "\n" . '<meta name="robots" content="noindex,follow" />' . "\n";
 	}
 
-	/**
-	 * Shortcode renderer.
-	 */
 	public static function render_shortcode($atts) {
 		$atts = shortcode_atts([
-			'max_items'       => '',
-			'order_by'        => 'date_desc',
-			'noindex_singles' => '0',
-			'eager_first'     => '2',
-			'browse_limit'    => '10',
+			'per_page'       => '24',
+			'infinite'       => '1',
+			'order_by'       => 'date_desc',
+			'noindex_singles'=> '0',
+			'eager_first'    => '2',
 		], $atts, self::SHORTCODE);
 
-		$max_items    = self::sanitize_int_or_empty($atts['max_items']);
-		$order_by     = sanitize_text_field($atts['order_by']);
-		$noindex      = absint($atts['noindex_singles']) === 1 ? 1 : 0;
-		$eager_first  = max(0, absint($atts['eager_first']));
-		$browse_limit = max(0, absint($atts['browse_limit']));
+		$per_page    = max(1, absint($atts['per_page']));
+		$infinite    = absint($atts['infinite']) === 1 ? 1 : 0;
+		$order_by    = sanitize_text_field($atts['order_by']);
+		$noindex     = absint($atts['noindex_singles']) === 1 ? 1 : 0;
+		$eager_first = max(0, absint($atts['eager_first']));
 
-		// Persist noindex flag (site-wide behavior for single gallery-items).
-		// This is safe and simple for your use case.
 		if ($noindex === 1) {
 			update_option('sgim_noindex_singles', 1, false);
 		}
 
-		// Enqueue assets only when the element is present on the page.
+		// Assets only when shortcode exists on the page.
 		wp_enqueue_style(self::STYLE_HANDLE);
 		wp_enqueue_script(self::SCRIPT_HANDLE);
 
 		wp_localize_script(self::SCRIPT_HANDLE, 'SGIM', [
-			'ajaxUrl'      => admin_url('admin-ajax.php'),
-			'nonce'        => wp_create_nonce('sgim_nonce'),
-			'maxItems'     => $max_items,
-			'orderBy'      => $order_by,
-			'eagerFirst'   => $eager_first,
-			'strings'      => [
+			'ajaxUrl'    => admin_url('admin-ajax.php'),
+			'nonce'      => wp_create_nonce('sgim_nonce'),
+			'orderBy'    => $order_by,
+			'eagerFirst' => $eager_first,
+			'perPage'    => $per_page,
+			'infinite'   => $infinite,
+			'strings'    => [
 				'noResults' => 'No images found for those filters.',
 				'loading'   => 'Loading images…',
 				'close'     => 'Close image viewer',
@@ -195,19 +183,19 @@ final class Salient_Gallery_Items_Mosaic {
 			],
 		]);
 
-		// Term options (cached).
 		$terms_market  = self::get_terms_cached('market');
 		$terms_product = self::get_terms_cached('product');
 		$terms_project = self::get_terms_cached('project');
 
-		// Initial items (cached).
-		$initial = self::get_items_cached([
-			'market'  => 0,
-			'product' => 0,
-			'project' => 0,
-			'max'     => $max_items,
-			'orderBy' => $order_by,
+		$initial_result = self::get_items_cached([
+			'market'   => 0,
+			'product'  => 0,
+			'project'  => 0,
+			'orderBy'  => $order_by,
+			'page'     => 1,
+			'per_page' => $per_page,
 		]);
+		$initial_items = $initial_result['items'];
 
 		ob_start();
 		?>
@@ -239,34 +227,35 @@ final class Salient_Gallery_Items_Mosaic {
 					<?php endforeach; ?>
 				</select>
 
-				<button type="button" class="sgim__clear" data-sgim-clear>
+				<button type="button" class="sgim__clear" data-sgim-clear hidden>
 					Clear Filters <span aria-hidden="true">×</span>
 				</button>
 			</div>
 
-			<div class="sgim__status" role="status" aria-live="polite" data-sgim-status></div>
-
 			<div class="sgim__grid" data-sgim-grid>
-				<?php echo self::render_items_html($initial, $eager_first); ?>
+				<?php echo self::render_items_html($initial_items, $eager_first); ?>
 			</div>
 
-			<?php
-			// (1) + (2) Schema: ItemList + ImageObject (for the initial visible items).
-			echo self::render_schema_jsonld($initial);
-			?>
+			<div class="sgim__status" role="status" aria-live="polite" data-sgim-status>
+        <span class="sgim__loader" data-sgim-loader hidden>
+          <span class="sgim__spinner" aria-hidden="true"></span>
+          <span class="sgim__loader-text">Loading images…</span>
+        </span>
+      </div>
+
+			<div class="sgim__sentinel" data-sgim-sentinel aria-hidden="true"></div>
 
 			<?php
-			// (5) Browse links for internal linking.
-			//echo self::render_browse_links($browse_limit); // REMOVED: Browse links section (not part of design)
+			// Schema for initial visible items only.
+			echo self::render_schema_jsonld($initial_items);
 			?>
 
-			<!-- Accessible lightbox / dialog -->
+			<!-- Accessible lightbox -->
 			<div class="sgim__lightbox" data-sgim-lightbox hidden>
 				<div class="sgim__lightbox-backdrop" data-sgim-close tabindex="-1" aria-hidden="true"></div>
 
 				<div class="sgim__lightbox-dialog" role="dialog" aria-modal="true" aria-label="Image viewer">
 					<button type="button" class="sgim__lightbox-close" data-sgim-close aria-label="Close image viewer">×</button>
-
 					<button type="button" class="sgim__lightbox-prev" data-sgim-prev aria-label="Previous image">‹</button>
 
 					<figure class="sgim__lightbox-figure">
@@ -282,72 +271,136 @@ final class Salient_Gallery_Items_Mosaic {
 		return ob_get_clean();
 	}
 
-	/**
-	 * AJAX: filter items. Returns new grid HTML + schema JSON-LD + browse links untouched.
-	 *
-	 * We only re-render the grid here for speed.
-	 */
 	public static function ajax_filter() {
 		check_ajax_referer('sgim_nonce', 'nonce');
 
-		$market  = isset($_POST['market'])  ? absint($_POST['market'])  : 0;
-		$product = isset($_POST['product']) ? absint($_POST['product']) : 0;
-		$project = isset($_POST['project']) ? absint($_POST['project']) : 0;
+		$market   = isset($_POST['market'])  ? absint($_POST['market'])  : 0;
+		$product  = isset($_POST['product']) ? absint($_POST['product']) : 0;
+		$project  = isset($_POST['project']) ? absint($_POST['project']) : 0;
 
-		$max = isset($_POST['maxItems']) ? self::sanitize_int_or_empty($_POST['maxItems']) : '';
-		$orderBy = isset($_POST['orderBy']) ? sanitize_text_field($_POST['orderBy']) : 'date_desc';
+		$orderBy     = isset($_POST['orderBy']) ? sanitize_text_field($_POST['orderBy']) : 'date_desc';
 		$eager_first = isset($_POST['eagerFirst']) ? max(0, absint($_POST['eagerFirst'])) : 2;
 
-		$items = self::get_items_cached([
-			'market'  => $market,
-			'product' => $product,
-			'project' => $project,
-			'max'     => $max,
-			'orderBy' => $orderBy,
+		$page     = isset($_POST['page']) ? max(1, absint($_POST['page'])) : 1;
+		$per_page = isset($_POST['perPage']) ? max(1, absint($_POST['perPage'])) : 24;
+
+		$result = self::get_items_cached([
+			'market'   => $market,
+			'product'  => $product,
+			'project'  => $project,
+			'orderBy'  => $orderBy,
+			'page'     => $page,
+			'per_page' => $per_page,
 		]);
+
+		$items    = $result['items'];
+		$has_more = (bool) $result['has_more'];
 
 		wp_send_json_success([
-			'count' => count($items),
-			'html'  => self::render_items_html($items, $eager_first),
+			'count'   => count($items),
+			'html'    => self::render_items_html($items, $eager_first),
+			'hasMore' => $has_more,
+			'page'    => $page,
 		]);
 	}
 
-	/**
-	 * Cached term lists (only terms with posts).
-	 */
-	private static function get_terms_cached($taxonomy) {
-		$key = self::CACHE_PREFIX . 'terms_' . $taxonomy;
-		$cached = get_transient($key);
-		if ($cached !== false) return $cached;
+  /**
+   * Cached term lists — ONLY terms that have at least one published gallery-items post.
+   *
+   * WordPress term counts can include other post types. This function avoids that by
+   * querying term relationships joined to posts filtered by post_type/post_status.
+   *
+   * @param string $taxonomy
+   * @return WP_Term[]
+   */
+  private static function get_terms_cached($taxonomy) {
+    $key = self::CACHE_PREFIX . 'terms_' . $taxonomy . '_gallery_items';
+    $cached = get_transient($key);
+    if ($cached !== false) return $cached;
 
-		$terms = get_terms([
-			'taxonomy'   => $taxonomy,
-			'hide_empty' => true,
-		]);
+    $terms = self::get_terms_for_post_type($taxonomy, 'gallery-items');
 
-		if (is_wp_error($terms)) $terms = [];
-		set_transient($key, $terms, self::CACHE_TTL_TERMS);
+    set_transient($key, $terms, self::CACHE_TTL_TERMS);
+    return $terms;
+  }
 
-		return $terms;
-	}
+  /**
+   * Return terms in a taxonomy that are actually used by a given post type.
+   * Results are ordered by term name.
+   *
+   * @param string $taxonomy
+   * @param string $post_type
+   * @return WP_Term[]
+   */
+  private static function get_terms_for_post_type($taxonomy, $post_type) {
+    global $wpdb;
 
-	/**
-	 * Cached query results by filter combo + max + order.
-	 */
+    $taxonomy = sanitize_key($taxonomy);
+    $post_type = sanitize_key($post_type);
+
+    // Get term_ids that are attached to published posts of the target post type.
+    $term_ids = $wpdb->get_col(
+      $wpdb->prepare(
+        "
+        SELECT DISTINCT tt.term_id
+        FROM {$wpdb->term_taxonomy} tt
+        INNER JOIN {$wpdb->term_relationships} tr ON tr.term_taxonomy_id = tt.term_taxonomy_id
+        INNER JOIN {$wpdb->posts} p ON p.ID = tr.object_id
+        WHERE tt.taxonomy = %s
+          AND p.post_type = %s
+          AND p.post_status = 'publish'
+        ",
+        $taxonomy,
+        $post_type
+      )
+    );
+
+    if (empty($term_ids)) return [];
+
+    // Now fetch full term objects, ordered nicely for the dropdown.
+    $terms = get_terms([
+      'taxonomy'   => $taxonomy,
+      'hide_empty' => false,      // we already filtered
+      'include'    => $term_ids,
+      'orderby'    => 'name',
+      'order'      => 'ASC',
+    ]);
+
+    if (is_wp_error($terms)) return [];
+    return $terms;
+  }
+
 	private static function get_items_cached($args) {
 		$key = self::CACHE_PREFIX . 'items_' . md5(wp_json_encode($args));
 		$cached = get_transient($key);
 		if ($cached !== false) return $cached;
 
-		$items = self::query_items($args);
-		set_transient($key, $items, self::CACHE_TTL_QUERY);
+		$result = self::query_items($args);
+		set_transient($key, $result, self::CACHE_TTL_QUERY);
 
-		return $items;
+		return $result;
 	}
 
 	/**
-	 * Query gallery-items and return compact render data.
+	 * Resolve a meta/ACF image value into an attachment ID.
+	 * Supports: ID, array, URL.
 	 */
+	private static function resolve_attachment_id($value) {
+		if (is_numeric($value)) return absint($value);
+
+		if (is_array($value)) {
+			if (!empty($value['ID'])) return absint($value['ID']);
+			if (!empty($value['id'])) return absint($value['id']);
+			return 0;
+		}
+
+		if (is_string($value) && $value !== '') {
+			return absint(attachment_url_to_postid($value));
+		}
+
+		return 0;
+	}
+
 	private static function query_items($args) {
 		$tax_query = ['relation' => 'AND'];
 
@@ -383,13 +436,16 @@ final class Salient_Gallery_Items_Mosaic {
 			default:           $order = 'DESC'; $orderby = 'date';  break;
 		}
 
+		$page     = !empty($args['page']) ? (int) $args['page'] : 1;
+		$per_page = !empty($args['per_page']) ? (int) $args['per_page'] : 24;
+
 		$query_args = [
 			'post_type'      => 'gallery-items',
 			'post_status'    => 'publish',
-			'posts_per_page' => (!empty($args['max']) ? (int) $args['max'] : -1),
+			'posts_per_page' => $per_page,
+			'paged'          => $page,
 			'orderby'        => $orderby,
 			'order'          => $order,
-			'no_found_rows'  => true,
 			'fields'         => 'ids',
 		];
 
@@ -400,37 +456,50 @@ final class Salient_Gallery_Items_Mosaic {
 		$q = new WP_Query($query_args);
 		$ids = $q->posts;
 
-		if (empty($ids)) return [];
+		$max_pages = (int) $q->max_num_pages;
+		$has_more  = ($page < $max_pages);
+
+		if (empty($ids)) {
+			return [
+				'items'    => [],
+				'has_more' => false,
+			];
+		}
 
 		$out = [];
 		foreach ($ids as $post_id) {
 			$title = get_the_title($post_id);
+			$permalink = get_permalink($post_id);
 
-			// ACF: image should return attachment ID.
-			$image_id = function_exists('get_field') ? (int) get_field('image', $post_id) : 0;
+			// Fast reads from meta (ACF stores values in post meta).
+			$img_meta = get_post_meta($post_id, 'image', true);
+			$image_id = self::resolve_attachment_id($img_meta);
 			if (!$image_id) continue;
 
-			$mosaic = function_exists('get_field') ? (string) get_field('mosaic_size', $post_id) : 'Regular';
+			$mosaic = (string) get_post_meta($post_id, 'mosaic_size', true);
 			$mosaic = self::normalize_mosaic_value($mosaic);
+
+			$desc = (string) get_post_meta($post_id, 'description', true);
 
 			$thumb_src    = wp_get_attachment_image_url($image_id, 'medium_large');
 			$img_src      = wp_get_attachment_image_url($image_id, 'large');
+
+			if (!$thumb_src) $thumb_src = wp_get_attachment_image_url($image_id, 'full');
+			if (!$img_src)   $img_src   = wp_get_attachment_image_url($image_id, 'full');
+
 			$thumb_srcset = wp_get_attachment_image_srcset($image_id, 'medium_large');
 			$thumb_sizes  = wp_get_attachment_image_sizes($image_id, 'medium_large');
 
-			// (4) Alt text fallback: attachment alt -> title -> "Title – Project/Market/Product" if available.
 			$alt = trim((string) get_post_meta($image_id, '_wp_attachment_image_alt', true));
 			if ($alt === '') {
 				$alt = self::build_alt_fallback($post_id, $title);
 			}
 
-			$desc = function_exists('get_field') ? (string) get_field('description', $post_id) : '';
-
 			$out[] = [
 				'id'           => (int) $post_id,
-				'permalink'    => (string) get_permalink($post_id),
+				'permalink'    => (string) $permalink,
 				'title'        => (string) $title,
-				'mosaic_size'  => $mosaic,
+				'mosaic_size'  => (string) $mosaic,
 				'thumb_src'    => (string) $thumb_src,
 				'thumb_srcset' => (string) $thumb_srcset,
 				'thumb_sizes'  => (string) $thumb_sizes,
@@ -440,13 +509,12 @@ final class Salient_Gallery_Items_Mosaic {
 			];
 		}
 
-		return $out;
+		return [
+			'items'    => $out,
+			'has_more' => (bool) $has_more,
+		];
 	}
 
-	/**
-	 * (3) Render tiles as <a> links (crawlable).
-	 * Also includes (4) SR-only caption and (7) LCP tuning for first N images.
-	 */
 	private static function render_items_html($items, $eager_first = 2) {
 		if (empty($items)) {
 			return '<div class="sgim__empty" role="status">No images found for those filters.</div>';
@@ -454,15 +522,12 @@ final class Salient_Gallery_Items_Mosaic {
 
 		$html = '';
 		foreach ($items as $index => $it) {
-
-			// (7) LCP tuning: first N images eager + fetchpriority.
 			$is_eager = ($index < $eager_first);
 
-			$loading = $is_eager ? 'eager' : 'lazy';
+			$loading       = $is_eager ? 'eager' : 'lazy';
 			$fetchpriority = $is_eager ? ' fetchpriority="high"' : '';
-			$decoding = 'decoding="async"';
+			$decoding      = 'decoding="async"';
 
-			// Visible caption is not requested; we add SR-only caption for richer semantics.
 			$caption = trim($it['description']) !== '' ? $it['description'] : $it['title'];
 
 			$html .= sprintf(
@@ -504,32 +569,28 @@ final class Salient_Gallery_Items_Mosaic {
 		return $html;
 	}
 
-	/**
-	 * (1) + (2) Schema: ItemList with embedded ImageObject per item.
-	 * Kept small and clean. Uses the initial visible items.
-	 */
 	private static function render_schema_jsonld($items) {
 		if (empty($items)) return '';
 
 		$list = [];
 		foreach ($items as $i => $it) {
 			$list[] = [
-				'@type' => 'ListItem',
-				'position' => $i + 1,
-				'url' => $it['permalink'],
-				'name' => $it['title'],
-				'image' => [
-					'@type' => 'ImageObject',
+				'@type'     => 'ListItem',
+				'position'  => $i + 1,
+				'url'       => $it['permalink'],
+				'name'      => $it['title'],
+				'image'     => [
+					'@type'      => 'ImageObject',
 					'contentUrl' => $it['img_src'],
-					'name' => $it['title'],
-					'caption' => (trim($it['description']) !== '' ? $it['description'] : $it['title']),
+					'name'       => $it['title'],
+					'caption'    => (trim($it['description']) !== '' ? $it['description'] : $it['title']),
 				],
 			];
 		}
 
 		$schema = [
-			'@context' => 'https://schema.org',
-			'@type' => 'ItemList',
+			'@context'        => 'https://schema.org',
+			'@type'           => 'ItemList',
 			'itemListElement' => $list,
 		];
 
@@ -538,66 +599,18 @@ final class Salient_Gallery_Items_Mosaic {
 			'</script>';
 	}
 
-	/**
-	 * (5) Browse links section for crawlable term paths.
-	 * Shows up to $limit terms per taxonomy, only non-empty.
-	 */
-	private static function render_browse_links($limit = 10) {
-		$limit = max(0, absint($limit));
-		if ($limit === 0) return '';
-
-		$taxes = [
-			'market'  => 'Browse Markets',
-			'product' => 'Browse Products',
-			'project' => 'Browse Projects',
-		];
-
-		$out = '<div class="sgim__browse" aria-label="Browse gallery categories">';
-
-		foreach ($taxes as $tax => $label) {
-			$terms = self::get_terms_cached($tax);
-			if (empty($terms)) continue;
-
-			$terms = array_slice($terms, 0, $limit);
-
-			$out .= '<div class="sgim__browse-block">';
-			$out .= '<div class="sgim__browse-title">' . esc_html($label) . '</div>';
-			$out .= '<ul class="sgim__browse-list">';
-
-			foreach ($terms as $t) {
-				$link = get_term_link($t);
-				if (is_wp_error($link)) continue;
-
-				$out .= '<li class="sgim__browse-item"><a href="' . esc_url($link) . '">' . esc_html($t->name) . '</a></li>';
-			}
-
-			$out .= '</ul></div>';
-		}
-
-		$out .= '</div>';
-
-		return $out;
-	}
-
-	/**
-	 * Pull a small list of terms for alt fallback.
-	 */
 	private static function build_alt_fallback($post_id, $title) {
 		$parts = [];
-
 		$taxes = ['project', 'market', 'product'];
+
 		foreach ($taxes as $tax) {
 			$terms = get_the_terms($post_id, $tax);
 			if (is_array($terms) && !empty($terms)) {
-				// Use first term only to avoid spammy alt text.
 				$parts[] = $terms[0]->name;
 			}
 		}
 
-		if (!empty($parts)) {
-			return $title . ' – ' . implode(', ', $parts);
-		}
-
+		if (!empty($parts)) return $title . ' – ' . implode(', ', $parts);
 		return $title;
 	}
 
@@ -616,12 +629,6 @@ final class Salient_Gallery_Items_Mosaic {
 		];
 
 		return isset($map[$key]) ? $map[$key] : 'Regular';
-	}
-
-	private static function sanitize_int_or_empty($val) {
-		$val = trim((string) $val);
-		if ($val === '') return '';
-		return (string) absint($val);
 	}
 }
 
