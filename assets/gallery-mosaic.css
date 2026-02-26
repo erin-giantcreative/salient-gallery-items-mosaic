@@ -141,40 +141,6 @@
 }
 
 /* =========================
-   Browse links (internal linking)
-   ========================= */
-
-.sgim__browse {
-  margin-top: 18px;
-  display: grid;
-  gap: 14px;
-}
-
-.sgim__browse-block {
-  border-radius: 12px;
-  padding: 14px;
-}
-
-.sgim__browse-title {
-  font-weight: 700;
-  margin-bottom: 8px;
-}
-
-.sgim__browse-list {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px 14px;
-}
-
-.sgim__browse-item a {
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-/* =========================
    Lightbox (AODA-compliant)
    ========================= */
 

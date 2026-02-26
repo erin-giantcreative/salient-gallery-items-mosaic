@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Salient - Gallery Items Mosaic (WPBakery Element)
  * Description: WPBakery element for Salient: filterable mosaic gallery for "gallery-items" CPT with ACF + taxonomies + accessible lightbox + cached AJAX.
- * Version: 1.1.0
+ * Version: 1.1.1
  * Author: Giant Creative Inc
  *
  * SEO / Performance improvements included:
@@ -70,14 +70,14 @@ final class Salient_Gallery_Items_Mosaic {
 			self::STYLE_HANDLE,
 			$plugin_url . 'assets/gallery-mosaic.css',
 			[],
-			'1.1.0'
+			'1.1.1'
 		);
 
 		wp_register_script(
 			self::SCRIPT_HANDLE,
 			$plugin_url . 'assets/gallery-mosaic.js',
 			['jquery'],
-			'1.1.0',
+			'1.1.1',
 			true
 		);
 	}
@@ -257,7 +257,7 @@ final class Salient_Gallery_Items_Mosaic {
 
 			<?php
 			// (5) Browse links for internal linking.
-			echo self::render_browse_links($browse_limit);
+			//echo self::render_browse_links($browse_limit); // REMOVED: Browse links section (not part of design)
 			?>
 
 			<!-- Accessible lightbox / dialog -->
