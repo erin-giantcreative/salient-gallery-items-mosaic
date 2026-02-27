@@ -23,18 +23,6 @@
 
 defined('ABSPATH') || exit;
 
-add_action('init', function () {
-  delete_transient('sgim_terms_market_gallery_items');
-  delete_transient('sgim_terms_product_gallery_items');
-  delete_transient('sgim_terms_project_gallery_items');
-  delete_transient('sgim_items_market_gallery_items');
-  delete_transient('sgim_items_product_gallery_items');
-  delete_transient('sgim_items_project_gallery_items');
-  delete_transient('sgim_items_orderBy_gallery_items');
-  delete_transient('sgim_items_per_page_gallery_items');
-  delete_transient('sgim_items_page_gallery_items');
-});
-
 final class Salient_Gallery_Items_Mosaic {
 
 	const SHORTCODE      = 'sgim_gallery_mosaic';
